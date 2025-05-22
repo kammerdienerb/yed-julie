@@ -7961,8 +7961,8 @@ static Julie_Status julie_builtin_fread_line(Julie_Interp *interp, Julie_Value *
     Julie_Value  *handle;
     FILE         *f;
     char         *line;
-    size_t       cap;
-    ssize_t      len;
+    size_t        cap;
+    ssize_t       len;
 
     status = julie_args(interp, expr, "o", n_values, values, &file);
     if (status != JULIE_SUCCESS) {
@@ -8013,9 +8013,10 @@ static Julie_Status julie_builtin_fread_lines(Julie_Interp *interp, Julie_Value 
     Julie_Value  *file;
     Julie_Value  *key;
     Julie_Value  *handle;
-    FILE        *f;
-    char        *line;
-    size_t       len;
+    FILE         *f;
+    char         *line;
+    size_t        cap;
+    ssize_t       len;
 
     status = julie_args(interp, expr, "o", n_values, values, &file);
     if (status != JULIE_SUCCESS) {
@@ -8043,13 +8044,18 @@ static Julie_Status julie_builtin_fread_lines(Julie_Interp *interp, Julie_Value 
     *result = julie_list_value(interp);
 
     line = NULL;
-    while ((line = fgetln(f, &len)) != NULL) {
-        if (len == 0) { continue; }
+    cap  = 0;
+    while ((len = getline(&line, &cap, f)) > 0) {
         if (line[len - 1] == '\n') {
-            len -= 1;
+            line[len - 1] = 0;
         }
+        JULIE_ARRAY_PUSH((*result)->list, julie_string_value_giveaway(interp, line));
+        line = NULL;
+        cap  = 0;
+    }
 
-        JULIE_ARRAY_PUSH((*result)->list, julie_string_value_known_size(interp, line, len));
+    if (line != NULL) {
+        free(line);
     }
 
 out:;
@@ -8979,6 +8985,7 @@ void julie_free(Julie_Interp *interp) {
     Julie_Value_Store_Block                      *next;
     char                                         *key;
     Julie_String_ID                              *id;
+    int                                           i;
     Julie_Source_Value_Info                      *info;
     Julie_Apply_Context                          *cxt;
     void                                         *handle;
@@ -9016,6 +9023,12 @@ void julie_free(Julie_Interp *interp) {
     }
 
     hash_table_free(interp->strings);
+
+    for (i = 0; i < JULIE_STRING_CACHE_SIZE; i += 1) {
+        if (interp->string_cache_pointers[i] != NULL) {
+            free(interp->string_cache_pointers[i]);
+        }
+    }
 
     julie_array_free(interp->iter_vals);
 
