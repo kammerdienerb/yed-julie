@@ -8126,11 +8126,8 @@ static Julie_Status julie_builtin_backtrace(Julie_Interp *interp, Julie_Value *e
 
     *result = julie_list_value(interp);
 
-    for (i = interp->apply_depth; i > 0; i -= 1) {
-        if (i == interp->apply_depth) { continue; }
-
-        it = &(((Julie_Apply_Context*)julie_array_elem(interp->apply_contexts, i - 1))->bt_entry);
-
+    i = 1;
+    while ((it = julie_bt_entry(interp, i)) != NULL) {
         s = julie_to_string(interp, it->fn, 0);
         snprintf(buff, sizeof(buff), "%s:%llu:%llu %s",
                  it->file_id == NULL ? "<?>" : julie_get_cstring(it->file_id),
@@ -8139,6 +8136,8 @@ static Julie_Status julie_builtin_backtrace(Julie_Interp *interp, Julie_Value *e
                  s);
         free(s);
         JULIE_ARRAY_PUSH((*result)->list, julie_string_value(interp, buff));
+
+        i += 1;
     }
 
 out:;
