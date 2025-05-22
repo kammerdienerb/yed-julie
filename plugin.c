@@ -630,6 +630,9 @@ int yed_plugin_boot(yed_plugin *self) {
     var_handler.fn   = evar;
     yed_plugin_add_event_handler(self, var_handler);
 
+    if (yed_get_var("julie-debug-log") == NULL) {
+        yed_set_var("julie-debug-log", "no");
+    }
     if (yed_get_var("julie-live-update") == NULL) {
         yed_set_var("julie-live-update", "yes");
     }
@@ -638,8 +641,6 @@ int yed_plugin_boot(yed_plugin *self) {
         yed_set_var("julie-interactive-file", path);
         free(path);
     }
-
-    yed_set_var("debug-log", "yes");
 
     yed_get_or_create_special_rdonly_buffer("*julie-output");
 
