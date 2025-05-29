@@ -4025,7 +4025,12 @@ static Julie_Status julie_builtin_unref(Julie_Interp *interp, Julie_Value *expr,
         goto out;
     }
 
-    status = julie_unbind_local(interp, id);
+    if (julie_array_len(interp->local_symtab_stack) > 0) {
+        status = julie_unbind_local(interp, id);
+    } else {
+        status = JULIE_ERR_LOOKUP;
+    }
+
     if (status != JULIE_SUCCESS) {
         status = julie_unbind(interp, id);
         if (status != JULIE_SUCCESS) {
