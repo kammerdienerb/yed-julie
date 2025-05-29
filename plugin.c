@@ -224,6 +224,10 @@ static void julie_error_cb(Julie_Error_Info *info) {
             snprintf(buff, sizeof(buff), " (%s) %s", info->load_package_failure.path, info->load_package_failure.package_error_message);
             julie_output_cb(buff, strlen(buff));
             break;
+        case JULIE_ERR_REGEX:
+            snprintf(buff, sizeof(buff), " %s", info->regex.regex_error_message);
+            julie_output_cb(buff, strlen(buff));
+            break;
         default:
             buff[0] = 0;
             break;
