@@ -94,7 +94,7 @@ static void set_val(const char *file, int line, int col, const char *s) {
     strncat(val_str, s, sizeof(val_str) - 1);
 }
 
-static Julie_Status julie_post_eval_cb(Julie_Status status, Julie_Value *value, Julie_Value **result) {
+static Julie_Status julie_post_eval_cb(Julie_Interp *interp, Julie_Status status, Julie_Value *value, Julie_Value **result) {
     const char              *message;
     Julie_Source_Value_Info *info;
     char                    *s;
@@ -245,7 +245,7 @@ static void julie_error_cb(Julie_Error_Info *info) {
     julie_output_cb(buff, strlen(buff));
 
     i = 1;
-    while ((it = julie_bt_entry(interp, i)) != NULL) {
+    while ((it = julie_bt_entry(info->interp, i)) != NULL) {
         s = julie_to_string(info->interp, it->fn, 0);
         snprintf(buff, sizeof(buff), "    %s:%llu:%llu %s\n",
                 it->file_id == NULL ? "<?>" : julie_get_cstring(it->file_id),
@@ -642,6 +642,11 @@ int yed_plugin_boot(yed_plugin *self) {
     }
     if (yed_get_var("julie-interactive-file") == NULL) {
         path = get_config_item_path("julie.j");
+        yed_set_var("julie-interactive-file", path);
+        free(path);
+    } else {
+        /* Re-set the var so that we can save the value in our handler. */
+        path = strdup(yed_get_var("julie-interactive-file"));
         yed_set_var("julie-interactive-file", path);
         free(path);
     }
