@@ -1428,6 +1428,7 @@ typedef struct Julie_Parse_Context_Struct {
     Julie_Array        *parse_stack;
     unsigned long long  err_line;
     unsigned long long  err_col;
+    int                 temporary;
 } Julie_Parse_Context;
 
 typedef char *Char_Ptr;
@@ -1782,8 +1783,7 @@ static Julie_Value *_julie_copy_real(Julie_Interp *interp, Julie_Value *value, i
             copy->list = JULIE_ARRAY_INIT;
             JULIE_ARRAY_RESERVE(copy->list, julie_array_len(value->list));
             ARRAY_FOR_EACH(value->list, it) {
-//                 JULIE_ARRAY_PUSH(copy->list, _julie_copy(interp, it, 1));
-                JULIE_ARRAY_PUSH(copy->list, it);
+                JULIE_ARRAY_PUSH(copy->list, it->source_node ? it : _julie_copy(interp, it, 1));
             }
             break;
 
@@ -1791,8 +1791,7 @@ static Julie_Value *_julie_copy_real(Julie_Interp *interp, Julie_Value *value, i
             copy->list = JULIE_ARRAY_INIT;
             JULIE_ARRAY_RESERVE(copy->list, julie_array_len(value->list));
             ARRAY_FOR_EACH(value->list, it) {
-//                 JULIE_ARRAY_PUSH(copy->list, _julie_copy(interp, it, 1));
-                JULIE_ARRAY_PUSH(copy->list, it);
+                JULIE_ARRAY_PUSH(copy->list, it->source_node ? it : _julie_copy(interp, it, 1));
             }
 
             closure     = julie_array_get_aux(value->list);
@@ -3610,8 +3609,8 @@ static Julie_Value *julie_push_list(Julie_Parse_Context *cxt) {
     value = JULIE_NEW();
     value->type         = JULIE_LIST;
     value->tag          = 0;
-    value->source_node  = 1;
-    value->owned        = 0;
+    value->source_node  = !cxt->temporary;
+    value->owned        = cxt->temporary;
     value->borrow_count = 0;
     value->list         = JULIE_ARRAY_INIT;
     JULIE_ARRAY_PUSH(cxt->parse_stack, value);
@@ -3800,6 +3799,8 @@ out_val:;
 
     JULIE_ASSERT(val != NULL);
 
+    if (cxt->temporary) { val->owned = 1; }
+
     *valout = val;
 
 out:;
@@ -3860,7 +3861,7 @@ done:;
 }
 
 
-static Julie_Status julie_parse_roots(Julie_Interp *interp, Julie_Array **rootsp, const char *str, int size, unsigned long long *err_line, unsigned long long *err_col) {
+static Julie_Status julie_parse_roots(Julie_Interp *interp, Julie_Array **rootsp, const char *str, int size, unsigned long long *err_line, unsigned long long *err_col, int temporary) {
     Julie_Parse_Context  cxt;
     Julie_Status         status;
     Julie_Value         *it;
@@ -3872,6 +3873,7 @@ static Julie_Status julie_parse_roots(Julie_Interp *interp, Julie_Array **rootsp
     cxt.end         = str + size;
     cxt.roots       = *rootsp;
     cxt.parse_stack = JULIE_ARRAY_INIT;
+    cxt.temporary   = temporary;
 
     status = JULIE_SUCCESS;
 
@@ -3908,7 +3910,7 @@ Julie_Status julie_parse(Julie_Interp *interp, const char *str, int size) {
     unsigned long long err_line;
     unsigned long long err_col;
 
-    status = julie_parse_roots(interp, &interp->roots, str, size, &err_line, &err_col);
+    status = julie_parse_roots(interp, &interp->roots, str, size, &err_line, &err_col, 0);
 
     if (status != JULIE_SUCCESS) {
         julie_make_parse_error(interp, err_line, err_col, status);
@@ -10245,7 +10247,7 @@ out:;
     return status;
 }
 
-static Julie_Status julie_parse_roots(Julie_Interp *interp, Julie_Array **rootsp, const char *str, int size, unsigned long long *err_line, unsigned long long *err_col);
+static Julie_Status julie_parse_roots(Julie_Interp *interp, Julie_Array **rootsp, const char *str, int size, unsigned long long *err_line, unsigned long long *err_col, int temporary);
 
 static Julie_Status julie_builtin_eval(Julie_Interp *interp, Julie_Value *expr, unsigned n_values, Julie_Value **values, Julie_Value **result) {
     Julie_Status        status;
@@ -10287,7 +10289,7 @@ static Julie_Status julie_builtin_eval(Julie_Interp *interp, Julie_Value *expr, 
     save_cur_file = interp->cur_file_id;
     julie_set_cur_file(interp, julie_get_string_id(interp, "<eval>"));
 
-    status = julie_parse_roots(interp, &roots, code_string, (int)code_len, &err_line, &err_col);
+    status = julie_parse_roots(interp, &roots, code_string, (int)code_len, &err_line, &err_col, 1);
 
     julie_set_cur_file(interp, save_cur_file);
 
@@ -10351,7 +10353,7 @@ static char *julie_get_sandbox_error_string(Julie_Error_Info *info) {
 #define P(_fmt, ...)                                                                                      \
 do {                                                                                                      \
     char *write_to = message + strlen(message);                                                           \
-    while (snprintf(write_to, size - strlen(message), (_fmt), __VA_ARGS__) >= (size - strlen(message))) { \
+    while ((size_t)snprintf(write_to, size - strlen(message), (_fmt), __VA_ARGS__) >= (size - strlen(message))) { \
         size += 64;                                                                                       \
         int off = (write_to - message);                                                                   \
         message = realloc(message, size);                                                                 \
