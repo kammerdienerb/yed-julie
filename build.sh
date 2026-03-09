@@ -7,6 +7,12 @@ if which pcre2-config > /dev/null && ! [[ $(pcre2-config --version) < "10.36" ]]
     PCRE2_LDFLAGS="$(pcre2-config --libs-posix)"
 fi
 
-gcc -c -o julie.o julie.c $(yed --print-cflags) ${PCRE2_CFLAGS} -Wall -Werror || exit $?
-gcc -c -o plugin.o plugin.c $(yed --print-cflags) ${PCRE2_CFLAGS} -Wall -Werror || exit $?
-gcc -o julie.so julie.o plugin.o $(yed --print-cflags --print-ldflags) ${PCRE2_LDFLAGS}
+if [[ $(uname) == "Darwin" ]]; then
+    WARN="-Wno-writable-strings -Wno-extern-c-compat"
+else
+    WARN="-Wno-write-strings -Wno-extern-c-compat"
+fi
+
+gcc -o julie.o  -c julie.c    $(yed --print-cflags) -Wall -Werror || exit $?
+g++ -o plugin.o -c plugin.cpp $(yed --print-cppflags) -std=c++20 -ftls-model=local-exec -Wall -Werror ${WARN} || exit $?
+g++ -o julie.so julie.o plugin.o $(yed --print-ldflags) ${PCRE2_LDFLAGS}

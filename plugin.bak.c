@@ -266,7 +266,7 @@ static void on_julie_update(void) {
     julie_dirty_time_ms = measure_time_now_ms();
 }
 
-static void create_julie_builtins(Julie_Interp *interp) {
+static void create_julie_builtins(void) {
 }
 
 static void *julie_timeout_thread(void *arg) {
@@ -299,13 +299,7 @@ static void *julie_thread(void *arg) {
     array_free(julie_output_chars);
     julie_output_chars = array_make_with_cap(char, JULIE_MAX_OUTPUT_LEN);
 
-    interp = julie_init_interp();
-    julie_set_error_callback(interp,     julie_error_cb);
-    julie_set_output_callback(interp,    julie_output_cb);
-    julie_set_post_eval_callback(interp, julie_post_eval_cb);
     julie_set_cur_file(interp, julie_get_string_id(interp, buffname));
-
-    create_julie_builtins(interp);
 
     status = julie_parse(interp, code, strlen(code));
     if (status == JULIE_SUCCESS) {
@@ -611,8 +605,13 @@ int yed_plugin_boot(yed_plugin *self) {
     YED_PLUG_VERSION_CHECK();
 
     Self = self;
-
     yed_plugin_set_unload_fn(self, unload);
+
+    interp = julie_init_interp();
+    julie_set_error_callback(interp,     julie_error_cb);
+    julie_set_output_callback(interp,    julie_output_cb);
+    julie_set_post_eval_callback(interp, julie_post_eval_cb);
+    create_julie_builtins();
 
     pump_handler.kind = EVENT_PRE_PUMP;
     pump_handler.fn   = epump;

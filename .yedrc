@@ -1,0 +1,8 @@
+set ctags-additional-paths '~/projects/yed/src/*'
+
+plugins-add-dir .
+set julie-debug-log 'yes'
+plugin-load julie
+xul-bind normal ctrl-j julie-prompt
+
+julie-eval 'eval-file "test.j"'
