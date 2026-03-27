@@ -1,5 +1,7 @@
 set ctags-additional-paths '~/projects/yed/src/*'
 
+plugin-unload 'ypm/plugins/julie'
+
 plugins-add-dir .
 set julie-debug-log 'yes'
 plugin-load julie

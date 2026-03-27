@@ -14,5 +14,5 @@ else
 fi
 
 gcc -o julie.o  -c julie.c    $(yed --print-cflags) -Wall -Werror || exit $?
-g++ -o plugin.o -c plugin.cpp $(yed --print-cppflags) -std=c++20 -ftls-model=local-exec -Wall -Werror ${WARN} || exit $?
-g++ -o julie.so julie.o plugin.o $(yed --print-ldflags) ${PCRE2_LDFLAGS}
+g++ -o plugin.o -c plugin.cpp $(yed --print-cppflags) -std=c++20 -ftls-model=local-dynamic -Wall -Werror ${WARN} || exit $?
+g++ -o julie.so plugin.o julie.o $(yed --print-ldflags) ${PCRE2_LDFLAGS}
