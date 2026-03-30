@@ -191,7 +191,13 @@ struct Interp_Thread_Data {
 thread_local Interp_Thread_Data interp_thread_data;
 
 struct Current_Event_Data {
-    int key;
+    int         kind      = 0;
+    int         key       = 0;
+    int         frame_idx = -1;
+    int         row       = 0;
+    int         col       = 0;
+    std::string buffer_name;
+    std::string path;
 };
 
 class Julie {
@@ -201,8 +207,9 @@ class Julie {
     std::atomic<bool>              pump_requested = false;
     bool                           yed_thread_free = false;
     std::atomic<int>               n_queued_for_sync = 0;
-    std::mutex           yed_sync_mtx;
+    std::mutex                     yed_sync_mtx;
     std::condition_variable        yed_sync_cond;
+    std::atomic<std::thread::id>   yed_context_owner;
     bool                           teardown = false;
     bool                           eval_running = false;
     std::mutex                     eval_mtx;
@@ -227,7 +234,28 @@ class Julie {
         julie_bind_fn(interp, julie_get_string_id(interp, "@buff-nlines"), _buff_nlines);
         julie_bind_fn(interp, julie_get_string_id(interp, "@buff-line"), _buff_line);
         julie_bind_fn(interp, julie_get_string_id(interp, "@buff-lines"), _buff_lines);
-        julie_bind_fn(interp, julie_get_string_id(interp, "@activate-frame"), _activate_frame);
+        julie_bind_fn(interp, julie_get_string_id(interp, "@activate-frame"),  _activate_frame);
+        julie_bind_fn(interp, julie_get_string_id(interp, "@get-var"),         _get_var);
+        julie_bind_fn(interp, julie_get_string_id(interp, "@set-var"),         _set_var);
+        julie_bind_fn(interp, julie_get_string_id(interp, "@frame-buffer"),    _frame_buffer);
+        julie_bind_fn(interp, julie_get_string_id(interp, "@frame-name"),      _frame_name);
+        julie_bind_fn(interp, julie_get_string_id(interp, "@frame-set-name"),  _frame_set_name);
+        julie_bind_fn(interp, julie_get_string_id(interp, "@frame-find-name"), _frame_find_name);
+        julie_bind_fn(interp, julie_get_string_id(interp, "@frame-delete"),    _frame_delete);
+        julie_bind_fn(interp, julie_get_string_id(interp, "@buffer-exists"),   _buffer_exists);
+        julie_bind_fn(interp, julie_get_string_id(interp, "@buffer-ft"),       _buffer_ft);
+        julie_bind_fn(interp, julie_get_string_id(interp, "@buffer-path"),     _buffer_path);
+
+        Julie_Value *on_frame_activated_list = julie_list_value(interp);
+        julie_bind(interp, julie_get_string_id(interp, "@on-frame-activated"), &on_frame_activated_list);
+        Julie_Value *on_buffer_load_list = julie_list_value(interp);
+        julie_bind(interp, julie_get_string_id(interp, "@on-buffer-load"), &on_buffer_load_list);
+        Julie_Value *on_frame_delete_list = julie_list_value(interp);
+        julie_bind(interp, julie_get_string_id(interp, "@on-frame-delete"), &on_frame_delete_list);
+        Julie_Value *on_cursor_move_list = julie_list_value(interp);
+        julie_bind(interp, julie_get_string_id(interp, "@on-cursor-move"), &on_cursor_move_list);
+        Julie_Value *on_buffer_focused_list = julie_list_value(interp);
+        julie_bind(interp, julie_get_string_id(interp, "@on-buffer-focused"), &on_buffer_focused_list);
 
         while (true) {
             Interp_Message msg = julie->interp_messages.pop();
@@ -309,20 +337,27 @@ class Julie {
                 }
 
                 case INTERP_MESSAGE_EVENT: {
+                    const char *list_name = NULL;
                     switch (msg.event.kind) {
-                        case EVENT_KEY_PRESSED: {
-                            Julie_Value *lookup = julie_lookup(interp, julie_get_string_id(interp, "@on-key"));
-                            if (lookup != NULL && lookup->type == JULIE_LIST) {
-                                Julie_Value *it;
-                                ARRAY_FOR_EACH(lookup->list, it) {
-                                    Julie_Value *result = NULL;
-                                    julie_eval(interp, it, &result);
-                                    if (result != NULL) {
-                                        julie_free_value(interp, result);
-                                    }
+                        case EVENT_KEY_PRESSED:      list_name = "@on-key";             break;
+                        case EVENT_FRAME_ACTIVATED:  list_name = "@on-frame-activated"; break;
+                        case EVENT_BUFFER_POST_LOAD: list_name = "@on-buffer-load";     break;
+                        case EVENT_FRAME_PRE_DELETE: list_name = "@on-frame-delete";    break;
+                        case EVENT_CURSOR_POST_MOVE: list_name = "@on-cursor-move";     break;
+                        case EVENT_BUFFER_FOCUSED:  list_name = "@on-buffer-focused";  break;
+                        default:                                                        break;
+                    }
+                    if (list_name != NULL) {
+                        Julie_Value *lookup = julie_lookup(interp, julie_get_string_id(interp, list_name));
+                        if (lookup != NULL && lookup->type == JULIE_LIST) {
+                            Julie_Value *it;
+                            ARRAY_FOR_EACH(lookup->list, it) {
+                                Julie_Value *result = NULL;
+                                julie_eval(interp, it, &result);
+                                if (result != NULL) {
+                                    julie_free_value(interp, result);
                                 }
                             }
-                            break;
                         }
                     }
                     break;
@@ -349,6 +384,7 @@ out:;
         YED_Thread_Lock(std::unique_lock<std::mutex> &&lock) : lock(std::move(lock)) {}
 
         ~YED_Thread_Lock() {
+            julie->yed_context_owner.store(std::thread::id{});
             julie->n_queued_for_sync -= 1;
             bool notify = (julie->n_queued_for_sync == 0);
             this->lock.unlock();
@@ -372,6 +408,7 @@ out:;
         while (!this->yed_thread_free) {
             this->yed_sync_cond.wait(lock);
         }
+        this->yed_context_owner.store(std::this_thread::get_id());
 
         return YED_Thread_Lock(std::move(lock));
     }
@@ -396,14 +433,54 @@ out:;
     Julie_Value *get_event_object(Julie_Interp *interp) {
         Julie_Value *object = julie_object_value(interp);
 
-        Julie_Value *sym_value = julie_symbol_value(interp, julie_get_string_id(interp, "'key"));
+        switch (this->current_event.kind) {
+            case EVENT_KEY_PRESSED: {
+                Julie_Value *sym = julie_symbol_value(interp, julie_get_string_id(interp, "'key"));
+                char *key_str = IS_MOUSE(this->current_event.key) ? strdup("mouse") : yed_keys_to_string(1, &this->current_event.key);
+                if (key_str == NULL) { key_str = strdup(""); }
+                julie_object_insert_field(interp, object, sym, julie_string_value_giveaway(interp, key_str), NULL);
+                break;
+            }
 
-        char *key_str = IS_MOUSE(this->current_event.key) ? strdup("mouse") : yed_keys_to_string(1, &this->current_event.key);
-        if (key_str == NULL) { key_str = strdup(""); }
+            case EVENT_FRAME_ACTIVATED:
+            case EVENT_FRAME_PRE_DELETE: {
+                Julie_Value *sym = julie_symbol_value(interp, julie_get_string_id(interp, "'frame"));
+                julie_object_insert_field(interp, object, sym, julie_sint_value(interp, this->current_event.frame_idx), NULL);
+                break;
+            }
 
-        Julie_Value *str_value = julie_string_value_giveaway(interp, key_str);
+            case EVENT_BUFFER_FOCUSED: {
+                Julie_Value *sym_frame = julie_symbol_value(interp, julie_get_string_id(interp, "'frame"));
+                julie_object_insert_field(interp, object, sym_frame, julie_sint_value(interp, this->current_event.frame_idx), NULL);
+                Julie_Value *sym_buf = julie_symbol_value(interp, julie_get_string_id(interp, "'buffer"));
+                julie_object_insert_field(interp, object, sym_buf,
+                    julie_string_value(interp, this->current_event.buffer_name.c_str()), NULL);
+                break;
+            }
 
-        julie_object_insert_field(interp, object, sym_value, str_value, NULL);
+            case EVENT_BUFFER_POST_LOAD: {
+                Julie_Value *sym_buf = julie_symbol_value(interp, julie_get_string_id(interp, "'buffer"));
+                julie_object_insert_field(interp, object, sym_buf,
+                    julie_string_value(interp, this->current_event.buffer_name.c_str()), NULL);
+                Julie_Value *sym_path = julie_symbol_value(interp, julie_get_string_id(interp, "'path"));
+                julie_object_insert_field(interp, object, sym_path,
+                    this->current_event.path.empty()
+                        ? julie_nil_value(interp)
+                        : julie_string_value(interp, this->current_event.path.c_str()),
+                    NULL);
+                break;
+            }
+
+            case EVENT_CURSOR_POST_MOVE: {
+                Julie_Value *sym_frame = julie_symbol_value(interp, julie_get_string_id(interp, "'frame"));
+                julie_object_insert_field(interp, object, sym_frame, julie_sint_value(interp, this->current_event.frame_idx), NULL);
+                Julie_Value *sym_row = julie_symbol_value(interp, julie_get_string_id(interp, "'row"));
+                julie_object_insert_field(interp, object, sym_row, julie_sint_value(interp, this->current_event.row), NULL);
+                Julie_Value *sym_col = julie_symbol_value(interp, julie_get_string_id(interp, "'col"));
+                julie_object_insert_field(interp, object, sym_col, julie_sint_value(interp, this->current_event.col), NULL);
+                break;
+            }
+        }
 
         return object;
     }
@@ -951,6 +1028,392 @@ out:;
         return status;
     }
 
+    static Julie_Status _get_var(Julie_Interp *interp, Julie_Value *expr, unsigned n_values, Julie_Value **values, Julie_Value **result) {
+        Julie_Status status = JULIE_SUCCESS;
+        *result = NULL;
+
+        if (n_values != 1) {
+            status = JULIE_ERR_ARITY;
+            julie_make_arity_error(interp, expr, 1, n_values, 0);
+            goto out;
+        }
+
+        {
+            Julie_Value *name = NULL;
+            status = julie_eval(interp, values[0], &name);
+            if (status != JULIE_SUCCESS) { *result = NULL; goto out; }
+            if (name->type != JULIE_STRING) {
+                status = JULIE_ERR_TYPE;
+                julie_make_type_error(interp, values[0], JULIE_STRING, (Julie_Type)name->type);
+                julie_free_value(interp, name);
+                goto out;
+            }
+
+            std::string varname = julie_value_cstring(name);
+            julie_free_value(interp, name);
+
+            {
+                auto lock = julie->pause_yed_thread_scoped();
+                char *val = yed_get_var(varname.c_str());
+                *result = val ? julie_string_value(interp, val) : julie_nil_value(interp);
+            }
+        }
+
+    out:;
+        return status;
+    }
+
+    static Julie_Status _set_var(Julie_Interp *interp, Julie_Value *expr, unsigned n_values, Julie_Value **values, Julie_Value **result) {
+        Julie_Status status = JULIE_SUCCESS;
+        *result = NULL;
+
+        if (n_values != 2) {
+            status = JULIE_ERR_ARITY;
+            julie_make_arity_error(interp, expr, 2, n_values, 0);
+            goto out;
+        }
+
+        {
+            Julie_Value *name = NULL;
+            status = julie_eval(interp, values[0], &name);
+            if (status != JULIE_SUCCESS) { *result = NULL; goto out; }
+            if (name->type != JULIE_STRING) {
+                status = JULIE_ERR_TYPE;
+                julie_make_type_error(interp, values[0], JULIE_STRING, (Julie_Type)name->type);
+                julie_free_value(interp, name);
+                goto out;
+            }
+            std::string varname = julie_value_cstring(name);
+            julie_free_value(interp, name);
+
+            Julie_Value *val = NULL;
+            status = julie_eval(interp, values[1], &val);
+            if (status != JULIE_SUCCESS) { *result = NULL; goto out; }
+            char *valstr = julie_to_string(interp, val, JULIE_NO_QUOTE);
+            julie_free_value(interp, val);
+
+            {
+                auto lock = julie->pause_yed_thread_scoped();
+                yed_set_var(varname.c_str(), valstr);
+            }
+            free(valstr);
+        }
+
+        *result = julie_nil_value(interp);
+    out:;
+        return status;
+    }
+
+    static Julie_Status _frame_buffer(Julie_Interp *interp, Julie_Value *expr, unsigned n_values, Julie_Value **values, Julie_Value **result) {
+        Julie_Status status = JULIE_SUCCESS;
+        *result = NULL;
+
+        if (n_values != 1) {
+            status = JULIE_ERR_ARITY;
+            julie_make_arity_error(interp, expr, 1, n_values, 0);
+            goto out;
+        }
+
+        {
+            Julie_Value *idx = NULL;
+            status = julie_eval(interp, values[0], &idx);
+            if (status != JULIE_SUCCESS) { *result = NULL; goto out; }
+            if (!JULIE_TYPE_IS_INTEGER(idx->type)) {
+                status = JULIE_ERR_TYPE;
+                julie_make_type_error(interp, values[0], _JULIE_INTEGER, (Julie_Type)idx->type);
+                julie_free_value(interp, idx);
+                goto out;
+            }
+
+            int i = idx->type == JULIE_SINT ? (int)idx->sint : (int)idx->uint;
+            julie_free_value(interp, idx);
+
+            {
+                auto lock = julie->pause_yed_thread_scoped();
+                yed_frame *frame = get_frame(i);
+                *result = (frame != NULL && frame->buffer != NULL)
+                    ? julie_string_value(interp, frame->buffer->name)
+                    : julie_nil_value(interp);
+            }
+        }
+
+    out:;
+        return status;
+    }
+
+    static Julie_Status _frame_name(Julie_Interp *interp, Julie_Value *expr, unsigned n_values, Julie_Value **values, Julie_Value **result) {
+        Julie_Status status = JULIE_SUCCESS;
+        *result = NULL;
+
+        if (n_values != 1) {
+            status = JULIE_ERR_ARITY;
+            julie_make_arity_error(interp, expr, 1, n_values, 0);
+            goto out;
+        }
+
+        {
+            Julie_Value *idx = NULL;
+            status = julie_eval(interp, values[0], &idx);
+            if (status != JULIE_SUCCESS) { *result = NULL; goto out; }
+            if (!JULIE_TYPE_IS_INTEGER(idx->type)) {
+                status = JULIE_ERR_TYPE;
+                julie_make_type_error(interp, values[0], _JULIE_INTEGER, (Julie_Type)idx->type);
+                julie_free_value(interp, idx);
+                goto out;
+            }
+
+            int i = idx->type == JULIE_SINT ? (int)idx->sint : (int)idx->uint;
+            julie_free_value(interp, idx);
+
+            {
+                auto lock = julie->pause_yed_thread_scoped();
+                yed_frame *frame = get_frame(i);
+                *result = (frame != NULL && frame->name != NULL)
+                    ? julie_string_value(interp, frame->name)
+                    : julie_nil_value(interp);
+            }
+        }
+
+    out:;
+        return status;
+    }
+
+    static Julie_Status _frame_set_name(Julie_Interp *interp, Julie_Value *expr, unsigned n_values, Julie_Value **values, Julie_Value **result) {
+        Julie_Status status = JULIE_SUCCESS;
+        *result = NULL;
+
+        if (n_values != 2) {
+            status = JULIE_ERR_ARITY;
+            julie_make_arity_error(interp, expr, 2, n_values, 0);
+            goto out;
+        }
+
+        {
+            Julie_Value *idx = NULL;
+            status = julie_eval(interp, values[0], &idx);
+            if (status != JULIE_SUCCESS) { *result = NULL; goto out; }
+            if (!JULIE_TYPE_IS_INTEGER(idx->type)) {
+                status = JULIE_ERR_TYPE;
+                julie_make_type_error(interp, values[0], _JULIE_INTEGER, (Julie_Type)idx->type);
+                julie_free_value(interp, idx);
+                goto out;
+            }
+            int i = idx->type == JULIE_SINT ? (int)idx->sint : (int)idx->uint;
+            julie_free_value(interp, idx);
+
+            Julie_Value *name = NULL;
+            status = julie_eval(interp, values[1], &name);
+            if (status != JULIE_SUCCESS) { *result = NULL; goto out; }
+            if (name->type != JULIE_STRING) {
+                status = JULIE_ERR_TYPE;
+                julie_make_type_error(interp, values[1], JULIE_STRING, (Julie_Type)name->type);
+                julie_free_value(interp, name);
+                goto out;
+            }
+            std::string namestr = julie_value_cstring(name);
+            julie_free_value(interp, name);
+
+            {
+                auto lock = julie->pause_yed_thread_scoped();
+                yed_frame *frame = get_frame(i);
+                if (frame != NULL) { yed_frame_set_name(frame, namestr.c_str()); }
+            }
+        }
+
+        *result = julie_nil_value(interp);
+    out:;
+        return status;
+    }
+
+    static Julie_Status _frame_find_name(Julie_Interp *interp, Julie_Value *expr, unsigned n_values, Julie_Value **values, Julie_Value **result) {
+        Julie_Status status = JULIE_SUCCESS;
+        *result = NULL;
+
+        if (n_values != 1) {
+            status = JULIE_ERR_ARITY;
+            julie_make_arity_error(interp, expr, 1, n_values, 0);
+            goto out;
+        }
+
+        {
+            Julie_Value *name = NULL;
+            status = julie_eval(interp, values[0], &name);
+            if (status != JULIE_SUCCESS) { *result = NULL; goto out; }
+            if (name->type != JULIE_STRING) {
+                status = JULIE_ERR_TYPE;
+                julie_make_type_error(interp, values[0], JULIE_STRING, (Julie_Type)name->type);
+                julie_free_value(interp, name);
+                goto out;
+            }
+            std::string namestr = julie_value_cstring(name);
+            julie_free_value(interp, name);
+
+            {
+                auto lock = julie->pause_yed_thread_scoped();
+                yed_frame *frame = yed_find_frame_by_name(namestr.c_str());
+                if (frame != NULL) {
+                    int i = 0;
+                    yed_frame **fit;
+                    array_traverse(ys->frames, fit) {
+                        if (*fit == frame) {
+                            *result = julie_sint_value(interp, i);
+                            goto out;
+                        }
+                        i += 1;
+                    }
+                }
+                *result = julie_nil_value(interp);
+            }
+        }
+
+    out:;
+        return status;
+    }
+
+    static Julie_Status _frame_delete(Julie_Interp *interp, Julie_Value *expr, unsigned n_values, Julie_Value **values, Julie_Value **result) {
+        Julie_Status status = JULIE_SUCCESS;
+        *result = NULL;
+
+        if (n_values != 1) {
+            status = JULIE_ERR_ARITY;
+            julie_make_arity_error(interp, expr, 1, n_values, 0);
+            goto out;
+        }
+
+        {
+            Julie_Value *idx = NULL;
+            status = julie_eval(interp, values[0], &idx);
+            if (status != JULIE_SUCCESS) { *result = NULL; goto out; }
+            if (!JULIE_TYPE_IS_INTEGER(idx->type)) {
+                status = JULIE_ERR_TYPE;
+                julie_make_type_error(interp, values[0], _JULIE_INTEGER, (Julie_Type)idx->type);
+                julie_free_value(interp, idx);
+                goto out;
+            }
+
+            int i = idx->type == JULIE_SINT ? (int)idx->sint : (int)idx->uint;
+            julie_free_value(interp, idx);
+
+            {
+                auto lock = julie->pause_yed_thread_scoped();
+                yed_frame *frame = get_frame(i);
+                if (frame != NULL) { yed_delete_frame(frame); }
+            }
+        }
+
+        *result = julie_nil_value(interp);
+    out:;
+        return status;
+    }
+
+    static Julie_Status _buffer_exists(Julie_Interp *interp, Julie_Value *expr, unsigned n_values, Julie_Value **values, Julie_Value **result) {
+        Julie_Status status = JULIE_SUCCESS;
+        *result = NULL;
+
+        if (n_values != 1) {
+            status = JULIE_ERR_ARITY;
+            julie_make_arity_error(interp, expr, 1, n_values, 0);
+            goto out;
+        }
+
+        {
+            Julie_Value *name = NULL;
+            status = julie_eval(interp, values[0], &name);
+            if (status != JULIE_SUCCESS) { *result = NULL; goto out; }
+            if (name->type != JULIE_STRING) {
+                status = JULIE_ERR_TYPE;
+                julie_make_type_error(interp, values[0], JULIE_STRING, (Julie_Type)name->type);
+                julie_free_value(interp, name);
+                goto out;
+            }
+            std::string buffname = julie_value_cstring(name);
+            julie_free_value(interp, name);
+
+            {
+                auto lock = julie->pause_yed_thread_scoped();
+                *result = julie_sint_value(interp, yed_get_buffer((char*)buffname.c_str()) != NULL);
+            }
+        }
+
+    out:;
+        return status;
+    }
+
+    static Julie_Status _buffer_ft(Julie_Interp *interp, Julie_Value *expr, unsigned n_values, Julie_Value **values, Julie_Value **result) {
+        Julie_Status status = JULIE_SUCCESS;
+        *result = NULL;
+
+        if (n_values != 1) {
+            status = JULIE_ERR_ARITY;
+            julie_make_arity_error(interp, expr, 1, n_values, 0);
+            goto out;
+        }
+
+        {
+            Julie_Value *name = NULL;
+            status = julie_eval(interp, values[0], &name);
+            if (status != JULIE_SUCCESS) { *result = NULL; goto out; }
+            if (name->type != JULIE_STRING) {
+                status = JULIE_ERR_TYPE;
+                julie_make_type_error(interp, values[0], JULIE_STRING, (Julie_Type)name->type);
+                julie_free_value(interp, name);
+                goto out;
+            }
+            std::string buffname = julie_value_cstring(name);
+            julie_free_value(interp, name);
+
+            {
+                auto lock = julie->pause_yed_thread_scoped();
+                yed_buffer *buff = yed_get_buffer((char*)buffname.c_str());
+                if (buff != NULL) {
+                    char *ft_name = yed_get_ft_name(buff->ft);
+                    *result = ft_name ? julie_string_value(interp, ft_name) : julie_nil_value(interp);
+                } else {
+                    *result = julie_nil_value(interp);
+                }
+            }
+        }
+
+    out:;
+        return status;
+    }
+
+    static Julie_Status _buffer_path(Julie_Interp *interp, Julie_Value *expr, unsigned n_values, Julie_Value **values, Julie_Value **result) {
+        Julie_Status status = JULIE_SUCCESS;
+        *result = NULL;
+
+        if (n_values != 1) {
+            status = JULIE_ERR_ARITY;
+            julie_make_arity_error(interp, expr, 1, n_values, 0);
+            goto out;
+        }
+
+        {
+            Julie_Value *name = NULL;
+            status = julie_eval(interp, values[0], &name);
+            if (status != JULIE_SUCCESS) { *result = NULL; goto out; }
+            if (name->type != JULIE_STRING) {
+                status = JULIE_ERR_TYPE;
+                julie_make_type_error(interp, values[0], JULIE_STRING, (Julie_Type)name->type);
+                julie_free_value(interp, name);
+                goto out;
+            }
+            std::string buffname = julie_value_cstring(name);
+            julie_free_value(interp, name);
+
+            {
+                auto lock = julie->pause_yed_thread_scoped();
+                yed_buffer *buff = yed_get_buffer((char*)buffname.c_str());
+                *result = (buff != NULL && buff->path != NULL)
+                    ? julie_string_value(interp, buff->path)
+                    : julie_nil_value(interp);
+            }
+        }
+
+    out:;
+        return status;
+    }
+
     static void cmd_dispatch(int n_args, char **args) {
         char  *cmd      = strdup(julie->cmd_dispatch_name.c_str());
         char **args_cpy = (char**)malloc(n_args * sizeof(*args));
@@ -1014,8 +1477,19 @@ public:
                     int c = last_line->visual_width + 1;
 
                     output_buff->flags &= ~BUFF_RD_ONLY;
+                    output_buff->flags |= BUFF_NO_MOD_EVENTS;
                     yed_buff_insert_string_no_undo(output_buff, msg->output.str, r, c);
+                    output_buff->flags &= ~BUFF_NO_MOD_EVENTS;
                     output_buff->flags |= BUFF_RD_ONLY;
+
+                    {
+                        yed_frame **fit;
+                        array_traverse(ys->frames, fit) {
+                            if (*fit != ys->active_frame && (*fit)->buffer == output_buff) {
+                                yed_set_cursor_far_within_frame(*fit, yed_buff_n_lines(output_buff), 1);
+                            }
+                        }
+                    }
 
 //                     LOG_CMD_ENTER("julie");
 //                     int len = strlen(msg->output.str);
@@ -1037,11 +1511,70 @@ public:
     }
 
     void setup_current_event(yed_event *event) {
-        memset(&this->current_event, 0, sizeof(this->current_event));
+        this->current_event = {};
+        this->current_event.kind = event->kind;
 
         switch (event->kind) {
             case EVENT_KEY_PRESSED:
                 this->current_event.key = event->key;
+                break;
+
+            case EVENT_FRAME_ACTIVATED:
+            case EVENT_FRAME_PRE_DELETE: {
+                if (event->frame != NULL) {
+                    int i = 0;
+                    yed_frame **fit;
+                    array_traverse(ys->frames, fit) {
+                        if (*fit == event->frame) {
+                            this->current_event.frame_idx = i;
+                            break;
+                        }
+                        i += 1;
+                    }
+                }
+                break;
+            }
+
+            case EVENT_BUFFER_POST_LOAD:
+                if (event->buffer != NULL) {
+                    this->current_event.buffer_name = event->buffer->name;
+                }
+                if (event->path != NULL) {
+                    this->current_event.path = event->path;
+                }
+                break;
+
+            case EVENT_BUFFER_FOCUSED:
+                if (event->frame != NULL) {
+                    int i = 0;
+                    yed_frame **fit;
+                    array_traverse(ys->frames, fit) {
+                        if (*fit == event->frame) {
+                            this->current_event.frame_idx = i;
+                            break;
+                        }
+                        i += 1;
+                    }
+                }
+                if (event->buffer != NULL) {
+                    this->current_event.buffer_name = event->buffer->name;
+                }
+                break;
+
+            case EVENT_CURSOR_POST_MOVE:
+                if (event->frame != NULL) {
+                    int i = 0;
+                    yed_frame **fit;
+                    array_traverse(ys->frames, fit) {
+                        if (*fit == event->frame) {
+                            this->current_event.frame_idx = i;
+                            break;
+                        }
+                        i += 1;
+                    }
+                }
+                this->current_event.row = event->new_row;
+                this->current_event.col = event->new_col;
                 break;
 
             default:
@@ -1058,7 +1591,14 @@ public:
     }
 
     struct Eval_Synchronizer {
+        bool is_noop;
+
         Eval_Synchronizer() {
+            if (julie->yed_context_owner.load() == std::this_thread::get_id()) {
+                is_noop = true;
+                return;
+            }
+            is_noop = false;
             std::unique_lock eval_lock(julie->eval_mtx);
             std::unique_lock sync_lock(julie->yed_sync_mtx);
             julie->eval_running    = true;
@@ -1067,6 +1607,7 @@ public:
             julie->yed_sync_cond.notify_all();
         }
         ~Eval_Synchronizer() {
+            if (is_noop) { return; }
             std::unique_lock eval_lock(julie->eval_mtx);
             while (julie->eval_running) {
                 julie->eval_cond.wait(eval_lock);
@@ -1084,7 +1625,7 @@ public:
         this->handle_yed_thread();
     }
 
-    void run_on_key(yed_event *event) {
+    void run_on_event(yed_event *event) {
         this->setup_current_event(event);
         {
             Eval_Synchronizer sync;
@@ -1206,7 +1747,27 @@ static void pump(yed_event *event) {
 }
 
 static void key(yed_event *event) {
-    julie->run_on_key(event);
+    julie->run_on_event(event);
+}
+
+static void frame_activated(yed_event *event) {
+    julie->run_on_event(event);
+}
+
+static void buffer_load(yed_event *event) {
+    julie->run_on_event(event);
+}
+
+static void buffer_focused(yed_event *event) {
+    julie->run_on_event(event);
+}
+
+static void frame_pre_delete(yed_event *event) {
+    julie->run_on_event(event);
+}
+
+static void cursor_move(yed_event *event) {
+    julie->run_on_event(event);
 }
 
 static void buffmod(yed_event *event) {
@@ -1252,6 +1813,26 @@ int yed_plugin_boot(yed_plugin *self) {
 
     h.kind = EVENT_KEY_PRESSED;
     h.fn   = key;
+    yed_plugin_add_event_handler(self, h);
+
+    h.kind = EVENT_FRAME_ACTIVATED;
+    h.fn   = frame_activated;
+    yed_plugin_add_event_handler(self, h);
+
+    h.kind = EVENT_BUFFER_POST_LOAD;
+    h.fn   = buffer_load;
+    yed_plugin_add_event_handler(self, h);
+
+    h.kind = EVENT_BUFFER_FOCUSED;
+    h.fn   = buffer_focused;
+    yed_plugin_add_event_handler(self, h);
+
+    h.kind = EVENT_FRAME_PRE_DELETE;
+    h.fn   = frame_pre_delete;
+    yed_plugin_add_event_handler(self, h);
+
+    h.kind = EVENT_CURSOR_POST_MOVE;
+    h.fn   = cursor_move;
     yed_plugin_add_event_handler(self, h);
 
     h.kind = EVENT_BUFFER_POST_MOD;
