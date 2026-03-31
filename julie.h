@@ -4992,7 +4992,7 @@ static Julie_Status _julie_builtin_assign(Julie_Interp *interp, Julie_Value *exp
             *result = NULL;
             status = JULIE_ERR_NOT_LVAL;
             julie_make_bind_error(interp, l, status, NULL);
-            goto out_free;
+            goto out;
         }
 
         if (rval->owned) {
@@ -5005,11 +5005,6 @@ static Julie_Status _julie_builtin_assign(Julie_Interp *interp, Julie_Value *exp
     }
 
     *result = julie_nil_value(interp);
-
-out_free:;
-    if (l->type != JULIE_SYMBOL) {
-        julie_free_value(interp, l);
-    }
 
 out:;
     return status;
