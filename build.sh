@@ -13,6 +13,20 @@ else
     WARN="-Wno-write-strings -Wno-extern-c-compat"
 fi
 
-gcc -o julie.o  -c julie.c    $(yed --print-cflags) -Wall -Werror || exit $?
-g++ -o plugin.o -c plugin.cpp $(yed --print-cppflags) -std=c++20 -ftls-model=local-dynamic -Wall -Werror ${WARN} || exit $?
-g++ -o julie.so plugin.o julie.o $(yed --print-ldflags) ${PCRE2_LDFLAGS}
+CPP_FLAGS="$(yed --print-cppflags) -std=c++20 -ftls-model=local-dynamic -Wall -Werror ${WARN}"
+
+pids=()
+
+gcc -o julie.o -c julie.c $(yed --print-cflags) -Wall -Werror &
+pids+=($!)
+
+for f in *.cpp; do
+    g++ -o $(basename ${f} .cpp).o -c ${f} ${CPP_FLAGS} &
+    pids+=($!)
+done
+
+for pid in "${pids[@]}"; do
+    wait ${pid} || exit $?
+done
+
+g++ -o julie.so *.o $(yed --print-ldflags) ${PCRE2_LDFLAGS}

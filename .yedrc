@@ -1,10 +1,11 @@
 set ctags-additional-paths '~/projects/yed/src/*'
 
-plugin-unload 'ypm/plugins/julie'
+# plugin-unload 'ypm/plugins/julie'
 
-plugins-add-dir .
+# plugins-add-dir .
 set julie-debug-log 'yes'
-plugin-load julie
+# plugin-load julie
 xul-bind normal ctrl-j julie-prompt
 
-julie-eval 'eval-file "test.j"'
+# julie-eval 'eval-file "test.j"'
+# julie-eval 'eval-file "/home/bkammerd/.config/yed/julie/main.j"'
