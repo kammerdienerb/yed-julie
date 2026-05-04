@@ -69,37 +69,18 @@ static void direct_eval_string(Julie_Interp *interp, const char *code) {
         return;
     }
 
-    if (julie_array_len(roots) == 0) {
-        julie_array_free(roots);
-        return;
+    Julie_Value *it;
+    ARRAY_FOR_EACH(roots, it) {
+        Julie_Value *ev = NULL;
+        status = julie_eval(interp, it, &ev);
+        if (status != JULIE_SUCCESS) { break; }
+        julie_free_value(interp, ev);
     }
 
-    Julie_Value *code_val;
-    if (julie_array_len(roots) == 1) {
-        code_val = (Julie_Value*)julie_array_elem(roots, 0);
-    } else {
-        Julie_Value *do_list = julie_list_value(interp);
-        Julie_Value *do_sym  = julie_symbol_value(interp, julie_get_string_id(interp, "do"));
-        JULIE_ARRAY_PUSH(do_list->list, do_sym);
-        Julie_Value *it;
-        ARRAY_FOR_EACH(roots, it) {
-            JULIE_ARRAY_PUSH(do_list->list, it);
-        }
-        code_val = do_list;
+    ARRAY_FOR_EACH(roots, it) {
+        julie_free_value(interp, it);
     }
-
-    Julie_Value *apply = julie_list_value(interp);
-    JULIE_ARRAY_PUSH(apply->list, code_val);
-
     julie_array_free(roots);
-
-    Julie_Value *result;
-    status = julie_eval(interp, apply, &result);
-    if (status == JULIE_SUCCESS) {
-        julie_free_value(interp, result);
-    }
-
-    julie_free_value(interp, apply);
 }
 
 static void direct_eval_cmd(Julie_Interp *interp, const char *cmd, int n_args, char **args) {
@@ -788,6 +769,26 @@ void Julie::handle_yed_thread() {
                 break;
             }
 
+            case EDITOR_MESSAGE_JULIE_CLEAR: {
+                auto output_buff = yed_get_or_create_special_rdonly_buffer("*julie-output");
+
+                output_buff->flags &= ~BUFF_RD_ONLY;
+                output_buff->flags |= BUFF_NO_MOD_EVENTS;
+                yed_buff_clear_no_undo(output_buff);
+                output_buff->flags &= ~BUFF_NO_MOD_EVENTS;
+                output_buff->flags |= BUFF_RD_ONLY;
+
+                {
+                    yed_frame **fit;
+                    array_traverse(ys->frames, fit) {
+                        if (*fit != ys->active_frame && (*fit)->buffer == output_buff) {
+                            yed_set_cursor_far_within_frame(*fit, yed_buff_n_lines(output_buff), 1);
+                        }
+                    }
+                }
+                break;
+            }
+
             case EDITOR_MESSAGE_JULIE_ERROR: {
                 yed_cerr("Julie error%s%s — see *julie-output",
                             msg->error.file ? " in " : "",
@@ -923,7 +924,8 @@ void Julie::run_on_event(yed_event *event) {
     this->setup_current_event(event);
     {
         Eval_Synchronizer sync;
-        this->push_interp_message({ .type = INTERP_MESSAGE_EVENT, .event = { .kind = event->kind } });
+        this->
+            push_interp_message({ .type = INTERP_MESSAGE_EVENT, .event = { .kind = event->kind } });
     }
     this->handle_yed_thread();
 }

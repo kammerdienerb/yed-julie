@@ -1756,11 +1756,19 @@ Julie_String_ID julie_value_string_id(Julie_Interp *interp, const Julie_Value *v
     __builtin_unreachable();
 }
 
+use_hash_table(Julie_Value_Ptr, Julie_Value_Ptr)
+typedef hash_table(Julie_Value_Ptr, Julie_Value_Ptr) _Julie_Object;
 
 static int julie_equal(Julie_Value *a, Julie_Value *b) {
-    unsigned long long  i;
-    Julie_Value        *ia;
-    Julie_Value        *ib;
+    unsigned long long   i;
+    Julie_Value         *ia;
+    Julie_Value         *ib;
+    Julie_Closure_Info  *closurea;
+    Julie_Closure_Info  *closureb;
+    Julie_String_ID      sym;
+    Julie_Value        **val;
+    Julie_Value        **lookup;
+    Julie_Value         *key;
 
     if (a->type != b->type) { return 0; }
 
@@ -1780,17 +1788,37 @@ static int julie_equal(Julie_Value *a, Julie_Value *b) {
             }
             return strcmp(julie_value_cstring(a), julie_value_cstring(b)) == 0;
         case JULIE_LIST:
+        case JULIE_FN:
+        case JULIE_LAMBDA:
             if (julie_array_len(a->list) != julie_array_len(b->list)) { return 0; }
             for (i = 0; i < julie_array_len(a->list); i += 1) {
                 ia = julie_array_elem(a->list, i);
                 ib = julie_array_elem(b->list, i);
                 if (!julie_equal(ia, ib)) { return 0; }
             }
+
+            if (a->type == JULIE_LAMBDA) {
+                closurea = julie_array_get_aux(a->list);
+                closureb = julie_array_get_aux(b->list);
+
+                hash_table_traverse(closurea->captures, sym, val) {
+                    lookup = hash_table_get_val(closureb->captures, sym);
+                    if (lookup == NULL || !julie_equal(*val, *lookup)) { return 0; }
+                }
+            }
+
             return 1;
+        case JULIE_OBJECT:
+        case JULIE_ERROR:
+            hash_table_traverse((_Julie_Object)a->object, key, val) {
+                lookup = hash_table_get_val((_Julie_Object)b->object, key);
+                if (lookup == NULL || !julie_equal(*val, *lookup)) { return 0; }
+            }
+        case JULIE_BUILTIN_FN:
+            return a->builtin_fn == b->builtin_fn;
         case JULIE_ACTOR:
             return a->actor == b->actor;
         default:
-            /* @todo: all types should be covered here */
             JULIE_ASSERT(0);
             break;
     }
@@ -1821,9 +1849,6 @@ static unsigned long long julie_value_hash(Julie_Value *val) {
     return 0;
 }
 
-
-use_hash_table(Julie_Value_Ptr, Julie_Value_Ptr)
-typedef hash_table(Julie_Value_Ptr, Julie_Value_Ptr) _Julie_Object;
 
 
 static Julie_Value *_julie_copy_real(Julie_Interp *interp, Julie_Value *value, int force);
@@ -4993,6 +5018,14 @@ static Julie_Status _julie_builtin_assign(Julie_Interp *interp, Julie_Value *exp
             *result = NULL;
             status = JULIE_ERR_NOT_LVAL;
             julie_make_bind_error(interp, l, status, NULL);
+            goto out;
+        }
+
+        if (julie_borrows_to_subvalues_outstanding(lval, lval)) {
+            *result = NULL;
+            status = JULIE_ERR_RELEASE_WHILE_BORROWED;
+            julie_make_bind_error(interp, expr, status, NULL);
+            julie_free_value(interp, rval);
             goto out;
         }
 
@@ -10137,7 +10170,7 @@ static Julie_Status julie_builtin_foreach(Julie_Interp *interp, Julie_Value *exp
                 goto out_pop;
             }
 
-            JULIE_BORROW_NO_CHECK(it);
+            JULIE_BORROW_NO_CHECK(bound);
 
             for (j = 2; j < n_values; j += 1) {
                 val = values[j];
@@ -10149,7 +10182,7 @@ static Julie_Status julie_builtin_foreach(Julie_Interp *interp, Julie_Value *exp
                 }
 
                 if (status != JULIE_SUCCESS) {
-                    JULIE_UNBORROW(it);
+                    JULIE_UNBORROW(bound);
                     if (interp->local_symtab_depth == 0) {
                         julie_unbind(interp, id);
                     } else {
@@ -10178,7 +10211,7 @@ static Julie_Status julie_builtin_foreach(Julie_Interp *interp, Julie_Value *exp
                 julie_free_value(interp, ev);
             }
 
-            JULIE_UNBORROW_NO_CHECK(it);
+            JULIE_UNBORROW_NO_CHECK(bound);
 
             if (interp->local_symtab_depth == 0) {
                 status = julie_unbind(interp, id);
@@ -10223,7 +10256,7 @@ static Julie_Status julie_builtin_foreach(Julie_Interp *interp, Julie_Value *exp
                 goto out_pop;
             }
 
-            JULIE_BORROW_NO_CHECK(it);
+            JULIE_BORROW_NO_CHECK(bound);
 
             for (j = 2; j < n_values; j += 1) {
                 val = values[j];
@@ -10235,7 +10268,7 @@ static Julie_Status julie_builtin_foreach(Julie_Interp *interp, Julie_Value *exp
                 }
 
                 if (status != JULIE_SUCCESS) {
-                    JULIE_UNBORROW(it);
+                    JULIE_UNBORROW(bound);
                     if (interp->local_symtab_depth == 0) {
                         julie_unbind(interp, id);
                     } else {
@@ -10265,7 +10298,7 @@ static Julie_Status julie_builtin_foreach(Julie_Interp *interp, Julie_Value *exp
                 julie_free_value(interp, ev);
             }
 
-            JULIE_UNBORROW_NO_CHECK(it);
+            JULIE_UNBORROW_NO_CHECK(bound);
 
             if (interp->local_symtab_depth == 0) {
                 status = julie_unbind(interp, id);

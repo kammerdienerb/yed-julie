@@ -153,11 +153,15 @@ struct Interp_Message {
 
 enum {
     EDITOR_MESSAGE_JULIE_OUTPUT,
+    EDITOR_MESSAGE_JULIE_CLEAR,
     EDITOR_MESSAGE_JULIE_ERROR,
 };
 
 struct Editor_Message_Output {
     char *str;
+};
+
+struct Editor_Message_Clear {
 };
 
 struct Editor_Message_Error {
@@ -171,6 +175,7 @@ struct Editor_Message {
     int type;
     union {
         Editor_Message_Output output;
+        Editor_Message_Clear  clear;
         Editor_Message_Error  error;
     };
 };
@@ -275,3 +280,53 @@ public:
 
 extern Julie *julie;
 extern yed_plugin *Self;
+
+static inline yed_frame *get_frame(int idx) {
+    if (idx < 0 || idx >= (int)array_len(ys->frames)) { return NULL; }
+    return *(yed_frame**)array_item(ys->frames, idx);
+}
+
+static inline int frame_to_idx(yed_frame *frame) {
+    int i = 0;
+    yed_frame **fit;
+    array_traverse(ys->frames, fit) {
+        if (*fit == frame) { return i; }
+        i += 1;
+    }
+    return -1;
+}
+
+static inline yed_frame_tree *get_tree(int idx) {
+    if (idx < 0 || idx >= (int)array_len(ys->frame_trees)) { return NULL; }
+    return *(yed_frame_tree**)array_item(ys->frame_trees, idx);
+}
+
+static inline int tree_to_idx(yed_frame_tree *tree) {
+    int i = 0;
+    yed_frame_tree **it;
+    array_traverse(ys->frame_trees, it) {
+        if (*it == tree) { return i; }
+        i += 1;
+    }
+    return -1;
+}
+
+static inline Julie_Value *tree_result(Julie_Interp *interp, yed_frame_tree *tree) {
+    int idx = tree ? tree_to_idx(tree) : -1;
+    return idx >= 0 ? julie_sint_value(interp, idx) : julie_nil_value(interp);
+}
+
+static inline yed_frame_tree *eval_tree_arg(Julie_Interp *interp, Julie_Value *expr, Julie_Value **values, Julie_Status *status) {
+    Julie_Value *handle = NULL;
+    *status = julie_eval(interp, values[0], &handle);
+    if (*status != JULIE_SUCCESS) { return NULL; }
+    if (!JULIE_TYPE_IS_INTEGER(handle->type)) {
+        *status = JULIE_ERR_TYPE;
+        julie_make_type_error(interp, values[0], _JULIE_INTEGER, (Julie_Type)handle->type);
+        julie_free_value(interp, handle);
+        return NULL;
+    }
+    int idx = handle->type == JULIE_SINT ? (int)handle->sint : (int)handle->uint;
+    julie_free_value(interp, handle);
+    return get_tree(idx);
+}

@@ -1,55 +1,5 @@
 #include "plugin.hpp"
 
-static yed_frame *get_frame(int idx) {
-    if (idx < 0 || idx >= (int)array_len(ys->frames)) { return NULL; }
-    return *(yed_frame**)array_item(ys->frames, idx);
-}
-
-static int frame_to_idx(yed_frame *frame) {
-    int i = 0;
-    yed_frame **fit;
-    array_traverse(ys->frames, fit) {
-        if (*fit == frame) { return i; }
-        i += 1;
-    }
-    return -1;
-}
-
-static yed_frame_tree *get_tree(int idx) {
-    if (idx < 0 || idx >= (int)array_len(ys->frame_trees)) { return NULL; }
-    return *(yed_frame_tree**)array_item(ys->frame_trees, idx);
-}
-
-static int tree_to_idx(yed_frame_tree *tree) {
-    int i = 0;
-    yed_frame_tree **it;
-    array_traverse(ys->frame_trees, it) {
-        if (*it == tree) { return i; }
-        i += 1;
-    }
-    return -1;
-}
-
-static Julie_Value *tree_result(Julie_Interp *interp, yed_frame_tree *tree) {
-    int idx = tree ? tree_to_idx(tree) : -1;
-    return idx >= 0 ? julie_sint_value(interp, idx) : julie_nil_value(interp);
-}
-
-static yed_frame_tree *eval_tree_arg(Julie_Interp *interp, Julie_Value *expr, Julie_Value **values, Julie_Status *status) {
-    Julie_Value *handle = NULL;
-    *status = julie_eval(interp, values[0], &handle);
-    if (*status != JULIE_SUCCESS) { return NULL; }
-    if (!JULIE_TYPE_IS_INTEGER(handle->type)) {
-        *status = JULIE_ERR_TYPE;
-        julie_make_type_error(interp, values[0], _JULIE_INTEGER, (Julie_Type)handle->type);
-        julie_free_value(interp, handle);
-        return NULL;
-    }
-    int idx = handle->type == JULIE_SINT ? (int)handle->sint : (int)handle->uint;
-    julie_free_value(interp, handle);
-    return get_tree(idx);
-}
-
 REGISTER_BINDING("@activate-frame", [](Julie_Interp *interp, Julie_Value *expr, unsigned n_values, Julie_Value **values, Julie_Value **result) -> Julie_Status
 {
     Julie_Status status = JULIE_SUCCESS;
