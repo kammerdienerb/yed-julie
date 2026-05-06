@@ -1814,6 +1814,7 @@ static int julie_equal(Julie_Value *a, Julie_Value *b) {
                 lookup = hash_table_get_val((_Julie_Object)b->object, key);
                 if (lookup == NULL || !julie_equal(*val, *lookup)) { return 0; }
             }
+            return 1;
         case JULIE_BUILTIN_FN:
             return a->builtin_fn == b->builtin_fn;
         case JULIE_ACTOR:
@@ -2402,6 +2403,7 @@ static inline void julie_replace_value(Julie_Interp *interp, Julie_Value *dst, J
 
     JULIE_ASSERT(!src->owned);
     JULIE_ASSERT(src->borrow_count == 0);
+    JULIE_ASSERT(!dst->source_node);
 
     /* Overwrite dst with val data, preserving original address. */
     save_owned = dst->owned;
@@ -2412,6 +2414,7 @@ static inline void julie_replace_value(Julie_Interp *interp, Julie_Value *dst, J
     *dst = *src;
     dst->borrow_count = save_bc;
     dst->owned = save_owned;
+    dst->source_node = 0;
 
     if (!src->source_node) {
         /* Free up copied outer src value. */
@@ -3381,7 +3384,7 @@ static Julie_Status julie_pop_local_symtab(Julie_Interp *interp, Julie_String_ID
             if (julie_symbol_starts_with_ampersand(interp, id)
             &&  val->type != JULIE_BUILTIN_FN) {
 
-                JULIE_UNBORROW(val);
+                JULIE_UNBORROW_NO_CHECK(val);
             }
         }
 
@@ -3407,7 +3410,7 @@ static Julie_Status julie_pop_local_symtab(Julie_Interp *interp, Julie_String_ID
             if (julie_symbol_starts_with_ampersand(interp, id)
             &&  val->type != JULIE_BUILTIN_FN) {
 
-                JULIE_UNBORROW(val);
+                JULIE_UNBORROW_NO_CHECK(val);
             }
         }
 
@@ -3449,17 +3452,13 @@ static Julie_Status _julie_bind_new(Julie_Interp           *interp,
         return JULIE_ERR_REF_OF_TRANSIENT;
     }
 
-    need_copy = 1;
+    JULIE_ASSERT(!ref || (*valuep)->owned);
 
-    if (!(*valuep)->source_node) {
-        if (ref) {
-            JULIE_ASSERT((*valuep)->owned);
+    need_copy = !ref;
 
+    if (!ref) {
+        if (!(*valuep)->owned && !(*valuep)->source_node) {
             need_copy = 0;
-        } else {
-            if (!(*valuep)->owned) {
-                need_copy = 0;
-            }
         }
     }
 
@@ -3470,7 +3469,8 @@ static Julie_Status _julie_bind_new(Julie_Interp           *interp,
     }
 
     if (ref) {
-        JULIE_BORROW(*valuep);
+        JULIE_ASSERT((*valuep)->owned);
+        JULIE_BORROW_NO_CHECK(*valuep);
     } else {
         JULIE_ASSERT(!(*valuep)->owned);
         (*valuep)->owned = 1;
@@ -3550,7 +3550,7 @@ static Julie_Status _julie_unbind(Julie_Interp *interp, const Julie_String_ID na
 
     if (ref) {
         JULIE_ASSERT(value->owned);
-        JULIE_UNBORROW(value);
+        JULIE_UNBORROW_NO_CHECK(value);
     } else {
         if (julie_borrows_outstanding(value)) {
             return JULIE_ERR_RELEASE_WHILE_BORROWED;
@@ -3610,6 +3610,8 @@ Julie_Value *julie_lookup(Julie_Interp *interp, const Julie_String_ID id) {
     }
 
     if (unlikely(val == NULL)) { return NULL; }
+
+    JULIE_ASSERT(val->owned);
 
     return val;
 }
@@ -4976,6 +4978,69 @@ out:;
     return status;
 }
 
+static Julie_Status julie_builtin_error_field(Julie_Interp *interp, Julie_Value *expr, unsigned n_values, Julie_Value **values, Julie_Value **result) {
+    Julie_Status  status;
+    Julie_Value  *error;
+    Julie_Value  *key;
+    Julie_Value  *field;
+
+    status = JULIE_SUCCESS;
+
+    if (n_values != 2) {
+        status = JULIE_ERR_ARITY;
+        julie_make_arity_error(interp, expr, 2, n_values, 0);
+        *result = NULL;
+        goto out;
+    }
+
+    status = julie_eval_no_throw(interp, values[0], &error);
+    if (status != JULIE_SUCCESS) {
+        *result = NULL;
+        goto out;
+    }
+
+    if (error->type != JULIE_ERROR) {
+        status = JULIE_ERR_TYPE;
+        julie_make_type_error(interp, values[0], JULIE_ERROR, error->type);
+        *result = NULL;
+        goto out_free_error;
+    }
+
+    status = julie_eval(interp, values[1], &key);
+    if (status != JULIE_SUCCESS) {
+        *result = NULL;
+        goto out_free_error;
+    }
+
+    if (!JULIE_TYPE_IS_KEYLIKE(key->type)) {
+        status = JULIE_ERR_TYPE;
+        julie_make_type_error(interp, values[1], _JULIE_KEYLIKE, key->type);
+        *result = NULL;
+        goto out_free_key;
+    }
+
+    field = julie_object_get_field(error, key);
+
+    if (field == NULL) {
+        status = JULIE_ERR_BAD_INDEX;
+        julie_make_bad_index_error(interp, values[1], key);
+        *result = NULL;
+        goto out_free_key;
+    } else {
+        field->owned = error->owned;
+        *result = julie_copy(interp, field);
+    }
+
+out_free_key:;
+    julie_free_value(interp, key);
+
+out_free_error:;
+    julie_free_value(interp, error);
+
+out:;
+    return status;
+}
+
 static Julie_Status _julie_builtin_assign(Julie_Interp *interp, Julie_Value *expr, unsigned n_values, Julie_Value **values, Julie_Value **result, int global) {
     Julie_Status     status;
     Julie_Value     *l;
@@ -5035,6 +5100,7 @@ static Julie_Status _julie_builtin_assign(Julie_Interp *interp, Julie_Value *exp
             rval = cpy;
         }
         julie_replace_value(interp, lval, rval);
+        JULIE_ASSERT(lval->owned);
         rval = lval;
     }
 
@@ -8805,7 +8871,7 @@ static Julie_Status _julie_builtin_field(Julie_Interp *interp, Julie_Value *expr
 
     if (!JULIE_TYPE_IS_KEYLIKE(key->type)) {
         status = JULIE_ERR_TYPE;
-        julie_make_type_error(interp, key, _JULIE_KEYLIKE, key->type);
+        julie_make_type_error(interp, values[0], _JULIE_KEYLIKE, key->type);
         *result = NULL;
         goto out_free_key;
     }
@@ -8814,7 +8880,7 @@ static Julie_Status _julie_builtin_field(Julie_Interp *interp, Julie_Value *expr
 
     if (field == NULL) {
         status = JULIE_ERR_BAD_INDEX;
-        julie_make_bad_index_error(interp, key, key);
+        julie_make_bad_index_error(interp, values[0], key);
         *result = NULL;
         goto out_free_key;
     } else {
@@ -9047,8 +9113,8 @@ static Julie_Status julie_builtin_get_or_insert_field(Julie_Interp *interp, Juli
     lookup = julie_object_get_field(o, key);
 
     if (lookup != NULL) {
+        lookup->owned = o->owned;
         *result = julie_copy(interp, lookup);
-        (*result)->owned = o->owned;
         goto out_free;
     }
 
@@ -9304,8 +9370,21 @@ static Julie_Status julie_builtin_new_instance(Julie_Interp *interp, Julie_Value
         key = key->source_node ? key : julie_force_copy(interp, key);
         val = julie_force_copy(interp, val);
 
-        julie_object_insert_field(interp, object, key, val, NULL);
+        status = julie_object_insert_field(interp, object, key, val, NULL);
+        if (status != JULIE_SUCCESS) {
+            julie_free_value(interp, key);
+            julie_free_value(interp, val);
+            julie_free_value(interp, class);
+            if (status == JULIE_ERR_RELEASE_WHILE_BORROWED) {
+                julie_make_bind_error(interp, expr, JULIE_ERR_RELEASE_WHILE_BORROWED, NULL);
+            } else {
+                julie_make_interp_error(interp, expr, JULIE_ERR_RELEASE_WHILE_BORROWED);
+            }
+            goto out;
+        }
     }
+
+    julie_free_value(interp, class);
 
     *result = object;
 
@@ -14227,6 +14306,7 @@ static Julie_Interp *_julie_init_interp(int sandboxed) {
     JULIE_BIND_FN(      "'",                     julie_builtin_quote);
 
     JULIE_BIND_FN(      "error",                 julie_builtin_error);
+    JULIE_BIND_FN(      "error-field",           julie_builtin_error_field);
 
     JULIE_BIND_INFIX_FN("=",                     julie_builtin_assign);
     JULIE_BIND_INFIX_FN(":=",                    julie_builtin_assign_global);
